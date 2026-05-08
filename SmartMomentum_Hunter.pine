@@ -27,12 +27,14 @@ isEUR_auto = str.contains(sym, "EURUSD")
 asset = preset == "AUTO" ? (isXAU_auto ? "XAUUSD" : isNDX_auto ? "NASDAQ100" : isEUR_auto ? "EURUSD" : "GENERIC") : preset
 
 // Parametri ottimizzati per asset (volatilità, sensibilità)
-swingLen      = asset == "XAUUSD"    ? 5  : asset == "NASDAQ100" ? 5  : asset == "EURUSD" ? 6  : 5
+swingLen      = asset == "XAUUSD"    ? 4  : asset == "NASDAQ100" ? 4  : asset == "EURUSD" ? 5  : 4
 atrLen        = 14
 atrSLmult     = asset == "XAUUSD"    ? 1.2 : asset == "NASDAQ100" ? 1.0 : asset == "EURUSD" ? 0.9 : 1.0
 atrTPmult     = asset == "XAUUSD"    ? 1.8 : asset == "NASDAQ100" ? 1.6 : asset == "EURUSD" ? 1.4 : 1.6
-volMult       = asset == "EURUSD"    ? 1.10 : 1.20    // EURUSD ha volume meno affidabile
-fvgMinAtrPct  = 0.15                                  // FVG minimo = 15% ATR per filtrare rumore
+volMult       = asset == "EURUSD"    ? 0.90 : 1.00    // soglia volume più permissiva
+fvgMinAtrPct  = 0.10                                  // FVG minimo = 10% ATR
+trigWindow    = 8                                     // bar di validità del trigger SMC
+scoreNeeded   = 3                                     // confluenze richieste (su 6) per entrare
 
 // Timeframe HTF dinamico in base al chart
 tfMin = timeframe.in_seconds(timeframe.period) / 60.0
@@ -228,18 +230,46 @@ macroBull = macroScore >= 1
 macroBear = macroScore <= -1
 
 // ============================================================
-//  CONFLUENZA → SCORE DIREZIONALE
+//  CONFLUENZA → TRIGGER PERSISTENTE + SCORE
 // ============================================================
-// Segnali grezzi
-trigUp = (bosUp or chochUp or sweepLow) and (inBullOB or not na(fvgBullBot) or close > ema21)
-trigDn = (bosDn or chochDn or sweepHigh) and (inBearOB or not na(fvgBearBot) or close < ema21)
+// Trigger SMC: persistente per "trigWindow" bar dopo l'evento
+var int barBosUp  = na
+var int barBosDn  = na
+var int barChoUp  = na
+var int barChoDn  = na
+var int barSweepL = na
+var int barSweepH = na
+if bosUp
+    barBosUp := bar_index
+if bosDn
+    barBosDn := bar_index
+if chochUp
+    barChoUp := bar_index
+if chochDn
+    barChoDn := bar_index
+if sweepLow
+    barSweepL := bar_index
+if sweepHigh
+    barSweepH := bar_index
 
-// Conferme
-confirmUp = (htfBias >= 1) and macdUp and rsiBull and volOk and obvUp and not macroBear
-confirmDn = (htfBias <= -1) and macdDn and rsiBear and volOk and obvDn and not macroBull
+f_recent(b) => not na(b) and (bar_index - b) <= trigWindow
 
-longSig  = trigUp and confirmUp
-shortSig = trigDn and confirmDn
+trigUpEvent = f_recent(barBosUp) or f_recent(barChoUp) or f_recent(barSweepL)
+trigDnEvent = f_recent(barBosDn) or f_recent(barChoDn) or f_recent(barSweepH)
+
+// Trigger di prezzo: tagging in zona FVG/OB bullish o bearish
+trigUpZone = inBullOB or (not na(fvgBullBot) and low <= fvgBullTop)
+trigDnZone = inBearOB or (not na(fvgBearTop) and high >= fvgBearBot)
+
+trigUp = trigUpEvent or trigUpZone
+trigDn = trigDnEvent or trigDnZone
+
+// Punteggio confluenze (0..6)
+scoreUp = (htfBias >= 1 ? 1 : 0) + (macdUp or macdHist > 0 ? 1 : 0) + (rsiV > 50 ? 1 : 0) + (volOk ? 1 : 0) + (obvUp ? 1 : 0) + (close > ema50 ? 1 : 0) + (not macroBear ? 1 : 0)
+scoreDn = (htfBias <= -1 ? 1 : 0) + (macdDn or macdHist < 0 ? 1 : 0) + (rsiV < 50 ? 1 : 0) + (volOk ? 1 : 0) + (obvDn ? 1 : 0) + (close < ema50 ? 1 : 0) + (not macroBull ? 1 : 0)
+
+longSig  = trigUp and scoreUp >= scoreNeeded and pos != 1
+shortSig = trigDn and scoreDn >= scoreNeeded and pos != -1
 
 // ============================================================
 //  GESTIONE STATO: ENTRY UNICO + CONT + EXIT
@@ -366,8 +396,8 @@ if showDash and barstate.islast
     table.cell(dash, 1, 7,  volOk ? "OK" : "weak", bgcolor=volOk ? color.new(color.green,40) : color.new(color.gray,40), text_color=color.white)
     table.cell(dash, 0, 8,  "FVG / OB / Liq",   bgcolor=color.new(color.gray,80))
     table.cell(dash, 1, 8,  fvgTxt + " | " + obTxt + " | " + liqTxt, text_size=size.small)
-    table.cell(dash, 0, 9,  "Macro Score",      bgcolor=color.new(color.gray,80))
-    table.cell(dash, 1, 9,  macroTxt + "  (" + str.tostring(macroScore, "#.#") + ")", bgcolor=macroCol, text_color=color.white)
+    table.cell(dash, 0, 9,  "Macro / Score L|S", bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 9,  macroTxt + "  L:" + str.tostring(scoreUp) + " S:" + str.tostring(scoreDn) + " (≥" + str.tostring(scoreNeeded) + ")", bgcolor=macroCol, text_color=color.white)
     table.cell(dash, 0, 10, "Posizione",        bgcolor=color.new(color.gray,80))
     table.cell(dash, 1, 10, posTxt, bgcolor=posCol, text_color=color.white)
     table.cell(dash, 0, 11, "Entry",            bgcolor=color.new(color.gray,80))
