@@ -296,13 +296,16 @@ scoreDn = (htfBias <= -1 ? 1 : 0) + (macdDn or macdHist < 0 ? 1 : 0) + (rsiV < 5
 stdLong  = trigUp and scoreUp >= scoreNeeded
 stdShort = trigDn and scoreDn >= scoreNeeded
 
-// Entry anticipato (PRE): flip di momentum sul LTF + bias HTF allineato + dentro zona FVG/OB,
-// non serve aspettare BOS sul TF operativo → riduce il ritardo di 1-2 candele
+// PRE-ENTRY zona: flip momentum sul LTF + bias HTF + dentro FVG/OB
 preLong  = ltfFlipUp and htfBias >= 1 and trigUpZone and not macroBear and close > ema21
 preShort = ltfFlipDn and htfBias <= -1 and trigDnZone and not macroBull and close < ema21
 
-longSig  = (stdLong  or preLong)  and pos != 1
-shortSig = (stdShort or preShort) and pos != -1
+// PRE-ENTRY pure-momentum: flip LTF + HTF allineato + macro + EMA50 (anticipo massimo)
+pureLong  = ltfFlipUp and htfBias >= 1 and not macroBear and close > ema50 and scoreUp >= 2
+pureShort = ltfFlipDn and htfBias <= -1 and not macroBull and close < ema50 and scoreDn >= 2
+
+longSigRaw  = stdLong  or preLong  or pureLong
+shortSigRaw = stdShort or preShort or pureShort
 
 // ============================================================
 //  GESTIONE STATO: ENTRY UNICO + CONT + EXIT
@@ -313,56 +316,59 @@ shortSig = (stdShort or preShort) and pos != -1
 swingLowRef  = ta.lowest(low,  swingLen*2)
 swingHighRef = ta.highest(high, swingLen*2)
 
-// Apertura LONG
-if longSig and pos != 1
+// Eventi del bar (per alert/dashboard, non vengono "lavati" dagli aggiornamenti di pos)
+bool didEntryLong  = false
+bool didEntryShort = false
+bool didExit       = false
+
+// 1) EXIT PRIMA — chiude la posizione esistente. Se arriva un segnale opposto,
+//    qui esce; l'entry opposto potrà aprirsi solo nel bar successivo (mai sovrapposti).
+exitLongCond  = pos == 1  and (high >= tpPx or low <= slPx or chochDn or macdCrossDn or ltfFlipDn or shortSigRaw)
+exitShortCond = pos == -1 and (low  <= tpPx or high >= slPx or chochUp or macdCrossUp or ltfFlipUp or longSigRaw)
+
+if exitLongCond
+    label.new(bar_index, high, "ESCI", color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_down, size=size.small)
+    pos := 0
+    entryPx := na
+    slPx := na
+    tpPx := na
+    didExit := true
+if exitShortCond
+    label.new(bar_index, low, "ESCI", color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_up, size=size.small)
+    pos := 0
+    entryPx := na
+    slPx := na
+    tpPx := na
+    didExit := true
+
+// 2) ENTRY DOPO — solo se flat (pos==0). Mai un long mentre short e viceversa.
+if longSigRaw and pos == 0
     pos := 1
     entryPx := close
     slPx    := math.min(swingLowRef, close - atrV*atrSLmult)
     tpPx    := close + atrV*atrTPmult
     entryBar := bar_index
-    txt = preLong and not stdLong ? "PRE-ENTRY▲\n" : "ENTRY▲\n"
-    if showHistory or bar_index >= last_bar_index - 1
-        label.new(bar_index, low, txt + str.tostring(entryPx, format.mintick), color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
+    label.new(bar_index, low, "ENTRA", color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
+    didEntryLong := true
 
-// Apertura SHORT
-if shortSig and pos != -1
+if shortSigRaw and pos == 0
     pos := -1
     entryPx := close
     slPx    := math.max(swingHighRef, close + atrV*atrSLmult)
     tpPx    := close - atrV*atrTPmult
     entryBar := bar_index
-    txt = preShort and not stdShort ? "PRE-ENTRY▼\n" : "ENTRY▼\n"
-    if showHistory or bar_index >= last_bar_index - 1
-        label.new(bar_index, high, txt + str.tostring(entryPx, format.mintick), color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
+    label.new(bar_index, high, "ENTRA", color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
+    didEntryShort := true
 
-// CONTINUAZIONE: stesso lato, nuovo BOS, momentum ancora valido
-contUp = pos == 1  and bosUp and macdUp and not macroBear and bar_index > entryBar + 2
-contDn = pos == -1 and bosDn and macdDn and not macroBull and bar_index > entryBar + 2
+// 3) CONTINUAZIONE — stesso colore della direzione del trade
+contUp = pos == 1  and (bosUp or ltfFlipUp) and macdHist > 0 and not macroBear and bar_index > entryBar + 2
+contDn = pos == -1 and (bosDn or ltfFlipDn) and macdHist < 0 and not macroBull and bar_index > entryBar + 2
 if contUp
-    label.new(bar_index, low, "CONT▲", color=color.new(color.teal,20), textcolor=color.white, style=label.style_label_up, size=size.tiny)
-    tpPx := close + atrV*atrTPmult        // estendi TP
+    label.new(bar_index, low, "CONTINUA", color=color.new(color.green,20), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+    tpPx := close + atrV*atrTPmult
 if contDn
-    label.new(bar_index, high, "CONT▼", color=color.new(color.maroon,20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+    label.new(bar_index, high, "CONTINUA", color=color.new(color.red,20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
     tpPx := close - atrV*atrTPmult
-
-// EXIT: TP hit, SL hit, reversal di structure/MACD, o flip LTF contrario (early exit)
-exitLong  = pos == 1  and (high >= tpPx or low <= slPx or chochDn or macdCrossDn or (ltfFlipDn and bar_index > entryBar + 1))
-exitShort = pos == -1 and (low  <= tpPx or high >= slPx or chochUp or macdCrossUp or (ltfFlipUp and bar_index > entryBar + 1))
-
-if exitLong
-    reason = high >= tpPx ? "TP1" : low <= slPx ? "SL" : ltfFlipDn ? "LTF" : "REV"
-    label.new(bar_index, high, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_down, size=size.small)
-    pos := 0
-    entryPx := na
-    slPx := na
-    tpPx := na
-if exitShort
-    reason = low <= tpPx ? "TP1" : high >= slPx ? "SL" : ltfFlipUp ? "LTF" : "REV"
-    label.new(bar_index, low, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_up, size=size.small)
-    pos := 0
-    entryPx := na
-    slPx := na
-    tpPx := na
 
 // ============================================================
 //  PLOT EMA + linee TP/SL operative
@@ -378,9 +384,9 @@ plot(pos != 0 ? slPx    : na, "SL",    color=color.new(color.red,0),   style=plo
 // ============================================================
 //  ALERTS
 // ============================================================
-alertcondition(longSig,  "LONG Entry",  "SMH LONG entry")
-alertcondition(shortSig, "SHORT Entry", "SMH SHORT entry")
-alertcondition(exitLong or exitShort, "EXIT", "SMH exit")
+alertcondition(didEntryLong,  "LONG Entry",  "SMH ENTRA LONG")
+alertcondition(didEntryShort, "SHORT Entry", "SMH ENTRA SHORT")
+alertcondition(didExit,       "EXIT",        "SMH ESCI")
 
 // ============================================================
 //  DASHBOARD
@@ -404,8 +410,8 @@ macroCol = macroBull ? color.new(color.green,30) : macroBear ? color.new(color.r
 posTxt = pos == 1 ? "LONG" : pos == -1 ? "SHORT" : "FLAT"
 posCol = pos == 1 ? color.new(color.green,10) : pos == -1 ? color.new(color.red,10) : color.new(color.gray,30)
 
-actionTxt = longSig ? "ENTRA LONG" : shortSig ? "ENTRA SHORT" : exitLong or exitShort ? "ESCI" : contUp ? "CONTINUA LONG" : contDn ? "CONTINUA SHORT" : pos != 0 ? "MANTIENI" : "ATTENDI"
-actionCol = longSig or contUp ? color.new(color.green,0) : shortSig or contDn ? color.new(color.red,0) : exitLong or exitShort ? color.new(color.orange,0) : color.new(color.gray,30)
+actionTxt = didEntryLong ? "ENTRA LONG" : didEntryShort ? "ENTRA SHORT" : didExit ? "ESCI" : contUp ? "CONTINUA LONG" : contDn ? "CONTINUA SHORT" : pos != 0 ? "MANTIENI" : "ATTENDI"
+actionCol = didEntryLong or contUp ? color.new(color.green,0) : didEntryShort or contDn ? color.new(color.red,0) : didExit ? color.new(color.orange,0) : color.new(color.gray,30)
 
 if showDash and barstate.islast
     var table dash = table.new(position.top_right, 2, 14, border_width=1, frame_color=color.new(color.gray,40), frame_width=1)
