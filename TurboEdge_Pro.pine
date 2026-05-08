@@ -1,4 +1,4 @@
-// © 2026 — Smart Momentum Hunter
+// © 2026 — Turbo Edge Flow
 // Pine Script v6 — Indicator
 // Pensato per certificati Turbo Fineco su XAUUSD, NASDAQ100 (E-mini), EURUSD
 // Logica: HTF bias + Smart Money (BOS/CHoCH, FVG, Order Block, Liquidity Sweep)
@@ -7,14 +7,14 @@
 // Niente strategy, niente backtest, 24/7.
 
 //@version=6
-indicator("Smart Momentum Hunter — XAU/NDX/EUR (SMC+Macro)", shorttitle="SMH", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+indicator("Turbo Edge Flow — XAU/NDX/EUR (SMC+Macro)", shorttitle="TEF", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 
 // ============================================================
-//  INPUT MINIMI
+//  CONFIG ZERO-INPUT (autonoma)
 // ============================================================
-preset = input.string("AUTO", "Sottostante", options=["AUTO","XAUUSD","NASDAQ100","EURUSD"], tooltip="AUTO rileva dal ticker. Carica i correlati ottimali per l'asset selezionato.")
-showHistory = input.bool(true, "Mostra segnali storici")
-showDash    = input.bool(true, "Mostra dashboard")
+preset = "AUTO"
+showHistory = true
+showDash    = true
 
 // ============================================================
 //  RILEVAMENTO ASSET + CONFIG OTTIMALE
@@ -255,6 +255,9 @@ var float  entryPx = na
 var float  slPx    = na
 var float  tpPx    = na
 var int    entryBar = na
+var label  lastEntryLabel = na
+var label  lastExitLabel  = na
+var label  lastContLabel  = na
 
 // Trigger SMC: persistente per "trigWindow" bar dopo l'evento
 var int barBosUp  = na
@@ -322,7 +325,8 @@ if longSig and pos != 1
     entryBar := bar_index
     txt = preLong and not stdLong ? "PRE-ENTRY▲\n" : "ENTRY▲\n"
     if showHistory or bar_index >= last_bar_index - 1
-        label.new(bar_index, low, txt + str.tostring(entryPx, format.mintick), color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
+        label.delete(lastEntryLabel)
+        lastEntryLabel := label.new(bar_index, low, txt + str.tostring(entryPx, format.mintick), color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
 
 // Apertura SHORT
 if shortSig and pos != -1
@@ -333,16 +337,19 @@ if shortSig and pos != -1
     entryBar := bar_index
     txt = preShort and not stdShort ? "PRE-ENTRY▼\n" : "ENTRY▼\n"
     if showHistory or bar_index >= last_bar_index - 1
-        label.new(bar_index, high, txt + str.tostring(entryPx, format.mintick), color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
+        label.delete(lastEntryLabel)
+        lastEntryLabel := label.new(bar_index, high, txt + str.tostring(entryPx, format.mintick), color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // CONTINUAZIONE: stesso lato, nuovo BOS, momentum ancora valido
 contUp = pos == 1  and bosUp and macdUp and not macroBear and bar_index > entryBar + 2
 contDn = pos == -1 and bosDn and macdDn and not macroBull and bar_index > entryBar + 2
 if contUp
-    label.new(bar_index, low, "CONT▲", color=color.new(color.teal,20), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+    label.delete(lastContLabel)
+    lastContLabel := label.new(bar_index, low, "CONT▲", color=color.new(color.teal,20), textcolor=color.white, style=label.style_label_up, size=size.tiny)
     tpPx := close + atrV*atrTPmult        // estendi TP
 if contDn
-    label.new(bar_index, high, "CONT▼", color=color.new(color.maroon,20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+    label.delete(lastContLabel)
+    lastContLabel := label.new(bar_index, high, "CONT▼", color=color.new(color.maroon,20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
     tpPx := close - atrV*atrTPmult
 
 // EXIT: TP hit, SL hit, reversal di structure/MACD, o flip LTF contrario (early exit)
@@ -351,14 +358,16 @@ exitShort = pos == -1 and (low  <= tpPx or high >= slPx or chochUp or macdCrossU
 
 if exitLong
     reason = high >= tpPx ? "TP1" : low <= slPx ? "SL" : ltfFlipDn ? "LTF" : "REV"
-    label.new(bar_index, high, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_down, size=size.small)
+    label.delete(lastExitLabel)
+    lastExitLabel := label.new(bar_index, high, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_down, size=size.small)
     pos := 0
     entryPx := na
     slPx := na
     tpPx := na
 if exitShort
     reason = low <= tpPx ? "TP1" : high >= slPx ? "SL" : ltfFlipUp ? "LTF" : "REV"
-    label.new(bar_index, low, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_up, size=size.small)
+    label.delete(lastExitLabel)
+    lastExitLabel := label.new(bar_index, low, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_up, size=size.small)
     pos := 0
     entryPx := na
     slPx := na
@@ -409,7 +418,7 @@ actionCol = longSig or contUp ? color.new(color.green,0) : shortSig or contDn ? 
 
 if showDash and barstate.islast
     var table dash = table.new(position.top_right, 2, 14, border_width=1, frame_color=color.new(color.gray,40), frame_width=1)
-    table.cell(dash, 0, 0,  "SMART MOMENTUM HUNTER", bgcolor=color.new(color.blue,30), text_color=color.white, text_size=size.normal)
+    table.cell(dash, 0, 0,  "TURBO EDGE FLOW", bgcolor=color.new(color.blue,30), text_color=color.white, text_size=size.normal)
     table.cell(dash, 1, 0,  asset, bgcolor=color.new(color.blue,50), text_color=color.white, text_size=size.normal)
     table.cell(dash, 0, 1,  "Timeframe",        bgcolor=color.new(color.gray,80))
     table.cell(dash, 1, 1,  timeframe.period + " | HTF " + htf1 + "/" + htf2 + " | LTF " + ltf)
