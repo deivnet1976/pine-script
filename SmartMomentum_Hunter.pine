@@ -41,6 +41,9 @@ tfMin = timeframe.in_seconds(timeframe.period) / 60.0
 htf1  = tfMin <= 5     ? "60"   : tfMin <= 30  ? "240" : tfMin <= 240 ? "D"   : "W"
 htf2  = tfMin <= 5     ? "240"  : tfMin <= 30  ? "D"   : tfMin <= 240 ? "W"   : "M"
 
+// Timeframe LTF per trigger anticipato (≈ TF/3)
+ltf   = tfMin <= 1     ? "1"    : tfMin <= 5   ? "1"   : tfMin <= 15  ? "5"   : tfMin <= 60  ? "15"  : tfMin <= 240 ? "60"  : "240"
+
 // ============================================================
 //  HTF BIAS (EMA stack + posizione del prezzo)
 // ============================================================
@@ -52,6 +55,20 @@ f_htf_bias(tf) =>
 bias1 = f_htf_bias(htf1)
 bias2 = f_htf_bias(htf2)
 htfBias = bias1 + bias2     // -2..+2
+
+// LTF FEED — momentum anticipato (MACD hist + EMA21 + RSI sul TF inferiore)
+f_ltf_feed() =>
+    [_ml, _ms, mh] = ta.macd(close, 12, 26, 9)
+    e21 = ta.ema(close, 21)
+    r   = ta.rsi(close, 14)
+    [mh, mh[1], r, close > e21]
+
+[ltfMh, ltfMhPrev, ltfRsi, ltfAboveE21] = request.security(syminfo.tickerid, ltf, f_ltf_feed(), lookahead=barmerge.lookahead_off)
+ltfMomUp = not na(ltfMh) and ltfMh > ltfMhPrev and ltfAboveE21 and ltfRsi > 50
+ltfMomDn = not na(ltfMh) and ltfMh < ltfMhPrev and not ltfAboveE21 and ltfRsi < 50
+// Flip recente di momentum sul LTF (entro 2 bar HTF) → segnale di pre-movimento
+ltfFlipUp = ltfMomUp and (not ltfMomUp[1] or not ltfMomUp[2])
+ltfFlipDn = ltfMomDn and (not ltfMomDn[1] or not ltfMomDn[2])
 
 // EMA locali
 ema21  = ta.ema(close, 21)
@@ -271,12 +288,21 @@ trigDnZone = inBearOB or (not na(fvgBearTop) and high >= fvgBearBot)
 trigUp = trigUpEvent or trigUpZone
 trigDn = trigDnEvent or trigDnZone
 
-// Punteggio confluenze (0..6)
-scoreUp = (htfBias >= 1 ? 1 : 0) + (macdUp or macdHist > 0 ? 1 : 0) + (rsiV > 50 ? 1 : 0) + (volOk ? 1 : 0) + (obvUp ? 1 : 0) + (close > ema50 ? 1 : 0) + (not macroBear ? 1 : 0)
-scoreDn = (htfBias <= -1 ? 1 : 0) + (macdDn or macdHist < 0 ? 1 : 0) + (rsiV < 50 ? 1 : 0) + (volOk ? 1 : 0) + (obvDn ? 1 : 0) + (close < ema50 ? 1 : 0) + (not macroBull ? 1 : 0)
+// Punteggio confluenze (0..8) — include LTF
+scoreUp = (htfBias >= 1 ? 1 : 0) + (macdUp or macdHist > 0 ? 1 : 0) + (rsiV > 50 ? 1 : 0) + (volOk ? 1 : 0) + (obvUp ? 1 : 0) + (close > ema50 ? 1 : 0) + (not macroBear ? 1 : 0) + (ltfMomUp ? 1 : 0)
+scoreDn = (htfBias <= -1 ? 1 : 0) + (macdDn or macdHist < 0 ? 1 : 0) + (rsiV < 50 ? 1 : 0) + (volOk ? 1 : 0) + (obvDn ? 1 : 0) + (close < ema50 ? 1 : 0) + (not macroBull ? 1 : 0) + (ltfMomDn ? 1 : 0)
 
-longSig  = trigUp and scoreUp >= scoreNeeded and pos != 1
-shortSig = trigDn and scoreDn >= scoreNeeded and pos != -1
+// Entry standard: trigger SMC + score >= soglia
+stdLong  = trigUp and scoreUp >= scoreNeeded
+stdShort = trigDn and scoreDn >= scoreNeeded
+
+// Entry anticipato (PRE): flip di momentum sul LTF + bias HTF allineato + dentro zona FVG/OB,
+// non serve aspettare BOS sul TF operativo → riduce il ritardo di 1-2 candele
+preLong  = ltfFlipUp and htfBias >= 1 and trigUpZone and not macroBear and close > ema21
+preShort = ltfFlipDn and htfBias <= -1 and trigDnZone and not macroBull and close < ema21
+
+longSig  = (stdLong  or preLong)  and pos != 1
+shortSig = (stdShort or preShort) and pos != -1
 
 // ============================================================
 //  GESTIONE STATO: ENTRY UNICO + CONT + EXIT
@@ -294,8 +320,9 @@ if longSig and pos != 1
     slPx    := math.min(swingLowRef, close - atrV*atrSLmult)
     tpPx    := close + atrV*atrTPmult
     entryBar := bar_index
+    txt = preLong and not stdLong ? "PRE-ENTRY▲\n" : "ENTRY▲\n"
     if showHistory or bar_index >= last_bar_index - 1
-        label.new(bar_index, low, "ENTRY▲\n" + str.tostring(entryPx, format.mintick), color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
+        label.new(bar_index, low, txt + str.tostring(entryPx, format.mintick), color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
 
 // Apertura SHORT
 if shortSig and pos != -1
@@ -304,8 +331,9 @@ if shortSig and pos != -1
     slPx    := math.max(swingHighRef, close + atrV*atrSLmult)
     tpPx    := close - atrV*atrTPmult
     entryBar := bar_index
+    txt = preShort and not stdShort ? "PRE-ENTRY▼\n" : "ENTRY▼\n"
     if showHistory or bar_index >= last_bar_index - 1
-        label.new(bar_index, high, "ENTRY▼\n" + str.tostring(entryPx, format.mintick), color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
+        label.new(bar_index, high, txt + str.tostring(entryPx, format.mintick), color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
 
 // CONTINUAZIONE: stesso lato, nuovo BOS, momentum ancora valido
 contUp = pos == 1  and bosUp and macdUp and not macroBear and bar_index > entryBar + 2
@@ -317,19 +345,19 @@ if contDn
     label.new(bar_index, high, "CONT▼", color=color.new(color.maroon,20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
     tpPx := close - atrV*atrTPmult
 
-// EXIT: TP hit, SL hit, o reversal di structure/MACD
-exitLong  = pos == 1  and (high >= tpPx or low <= slPx or chochDn or macdCrossDn)
-exitShort = pos == -1 and (low  <= tpPx or high >= slPx or chochUp or macdCrossUp)
+// EXIT: TP hit, SL hit, reversal di structure/MACD, o flip LTF contrario (early exit)
+exitLong  = pos == 1  and (high >= tpPx or low <= slPx or chochDn or macdCrossDn or (ltfFlipDn and bar_index > entryBar + 1))
+exitShort = pos == -1 and (low  <= tpPx or high >= slPx or chochUp or macdCrossUp or (ltfFlipUp and bar_index > entryBar + 1))
 
 if exitLong
-    reason = high >= tpPx ? "TP1" : low <= slPx ? "SL" : "REV"
+    reason = high >= tpPx ? "TP1" : low <= slPx ? "SL" : ltfFlipDn ? "LTF" : "REV"
     label.new(bar_index, high, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_down, size=size.small)
     pos := 0
     entryPx := na
     slPx := na
     tpPx := na
 if exitShort
-    reason = low <= tpPx ? "TP1" : high >= slPx ? "SL" : "REV"
+    reason = low <= tpPx ? "TP1" : high >= slPx ? "SL" : ltfFlipUp ? "LTF" : "REV"
     label.new(bar_index, low, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_up, size=size.small)
     pos := 0
     entryPx := na
@@ -384,13 +412,15 @@ if showDash and barstate.islast
     table.cell(dash, 0, 0,  "SMART MOMENTUM HUNTER", bgcolor=color.new(color.blue,30), text_color=color.white, text_size=size.normal)
     table.cell(dash, 1, 0,  asset, bgcolor=color.new(color.blue,50), text_color=color.white, text_size=size.normal)
     table.cell(dash, 0, 1,  "Timeframe",        bgcolor=color.new(color.gray,80))
-    table.cell(dash, 1, 1,  timeframe.period + " (HTF " + htf1 + "/" + htf2 + ")")
+    table.cell(dash, 1, 1,  timeframe.period + " | HTF " + htf1 + "/" + htf2 + " | LTF " + ltf)
     table.cell(dash, 0, 2,  "HTF Bias",         bgcolor=color.new(color.gray,80))
     table.cell(dash, 1, 2,  f_trendTxt(htfBias), bgcolor=f_trendCol(htfBias), text_color=color.white)
     table.cell(dash, 0, 3,  "Struttura",        bgcolor=color.new(color.gray,80))
     table.cell(dash, 1, 3,  structTxt, bgcolor=structCol, text_color=color.white)
-    table.cell(dash, 0, 4,  "Momentum",         bgcolor=color.new(color.gray,80))
-    table.cell(dash, 1, 4,  momentumTxt, bgcolor=momentumCol, text_color=color.white)
+    ltfTxt = ltfMomUp ? "BULL ↑" : ltfMomDn ? "BEAR ↓" : "—"
+    ltfCol = ltfMomUp ? color.new(color.green,30) : ltfMomDn ? color.new(color.red,30) : color.new(color.gray,40)
+    table.cell(dash, 0, 4,  "Momentum / LTF",   bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 4,  momentumTxt + "  /  " + ltfTxt, bgcolor=momentumCol == color.new(color.gray,40) ? ltfCol : momentumCol, text_color=color.white)
     table.cell(dash, 0, 5,  "MACD hist",        bgcolor=color.new(color.gray,80))
     table.cell(dash, 1, 5,  str.tostring(macdHist, "#.####"))
     table.cell(dash, 0, 6,  "RSI(14)",          bgcolor=color.new(color.gray,80))
