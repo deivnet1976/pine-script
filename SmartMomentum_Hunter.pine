@@ -202,8 +202,8 @@ obvDn = obv < ta.ema(obv, 21)
 //  MACRO INTER-MARKET (correlazioni che pesano sulla direzione)
 // ============================================================
 f_chg(tf, tk) =>
-    s = request.security(tk, tf, close, lookahead=barmerge.lookahead_off)
-    chg = (s - s[1]) / s[1] * 100
+    s = request.security(tk, tf, close, ignore_invalid_symbol=true, lookahead=barmerge.lookahead_off)
+    chg = na(s) or na(s[1]) or s[1] == 0 ? 0.0 : (s - s[1]) / s[1] * 100
     chg
 
 // fonti
@@ -232,6 +232,13 @@ macroBear = macroScore <= -1
 // ============================================================
 //  CONFLUENZA → TRIGGER PERSISTENTE + SCORE
 // ============================================================
+// Stato posizione (dichiarato qui perché usato nei segnali)
+var int    pos     = 0     // 1 long, -1 short, 0 flat
+var float  entryPx = na
+var float  slPx    = na
+var float  tpPx    = na
+var int    entryBar = na
+
 // Trigger SMC: persistente per "trigWindow" bar dopo l'evento
 var int barBosUp  = na
 var int barBosDn  = na
@@ -274,11 +281,7 @@ shortSig = trigDn and scoreDn >= scoreNeeded and pos != -1
 // ============================================================
 //  GESTIONE STATO: ENTRY UNICO + CONT + EXIT
 // ============================================================
-var int    pos = 0          // 1 long, -1 short, 0 flat
-var float  entryPx = na
-var float  slPx    = na
-var float  tpPx    = na
-var int    entryBar = na
+// (variabili pos/entryPx/slPx/tpPx/entryBar dichiarate prima dei segnali)
 
 // SL / TP basati su ATR + struttura
 swingLowRef  = ta.lowest(low,  swingLen*2)
