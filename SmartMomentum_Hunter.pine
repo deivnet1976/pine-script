@@ -1,0 +1,378 @@
+// © 2026 — Smart Momentum Hunter
+// Pine Script v6 — Indicator
+// Pensato per certificati Turbo Fineco su XAUUSD, NASDAQ100 (E-mini), EURUSD
+// Logica: HTF bias + Smart Money (BOS/CHoCH, FVG, Order Block, Liquidity Sweep)
+//         + Momentum (MACD, RSI), conferma Volume/OBV, filtro macro inter-market.
+// Output: ENTRY / EXIT / CONT a grafico (storici visibili) + Dashboard.
+// Niente strategy, niente backtest, 24/7.
+
+//@version=6
+indicator("Smart Momentum Hunter — XAU/NDX/EUR (SMC+Macro)", shorttitle="SMH", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// ============================================================
+//  INPUT MINIMI
+// ============================================================
+preset = input.string("AUTO", "Sottostante", options=["AUTO","XAUUSD","NASDAQ100","EURUSD"], tooltip="AUTO rileva dal ticker. Carica i correlati ottimali per l'asset selezionato.")
+showHistory = input.bool(true, "Mostra segnali storici")
+showDash    = input.bool(true, "Mostra dashboard")
+
+// ============================================================
+//  RILEVAMENTO ASSET + CONFIG OTTIMALE
+// ============================================================
+sym  = syminfo.ticker
+isXAU_auto = str.contains(sym, "XAU") or str.contains(sym, "GOLD")
+isNDX_auto = str.contains(sym, "NQ")  or str.contains(sym, "NDX") or str.contains(sym, "NAS100") or str.contains(sym, "USTEC") or str.contains(sym, "US100")
+isEUR_auto = str.contains(sym, "EURUSD")
+
+asset = preset == "AUTO" ? (isXAU_auto ? "XAUUSD" : isNDX_auto ? "NASDAQ100" : isEUR_auto ? "EURUSD" : "GENERIC") : preset
+
+// Parametri ottimizzati per asset (volatilità, sensibilità)
+swingLen      = asset == "XAUUSD"    ? 5  : asset == "NASDAQ100" ? 5  : asset == "EURUSD" ? 6  : 5
+atrLen        = 14
+atrSLmult     = asset == "XAUUSD"    ? 1.2 : asset == "NASDAQ100" ? 1.0 : asset == "EURUSD" ? 0.9 : 1.0
+atrTPmult     = asset == "XAUUSD"    ? 1.8 : asset == "NASDAQ100" ? 1.6 : asset == "EURUSD" ? 1.4 : 1.6
+volMult       = asset == "EURUSD"    ? 1.10 : 1.20    // EURUSD ha volume meno affidabile
+fvgMinAtrPct  = 0.15                                  // FVG minimo = 15% ATR per filtrare rumore
+
+// Timeframe HTF dinamico in base al chart
+tfMin = timeframe.in_seconds(timeframe.period) / 60.0
+htf1  = tfMin <= 5     ? "60"   : tfMin <= 30  ? "240" : tfMin <= 240 ? "D"   : "W"
+htf2  = tfMin <= 5     ? "240"  : tfMin <= 30  ? "D"   : tfMin <= 240 ? "W"   : "M"
+
+// ============================================================
+//  HTF BIAS (EMA stack + posizione del prezzo)
+// ============================================================
+f_htf_bias(tf) =>
+    [c1, e50, e200] = request.security(syminfo.tickerid, tf, [close, ta.ema(close,50), ta.ema(close,200)], lookahead=barmerge.lookahead_off)
+    bias = c1 > e50 and e50 > e200 ? 1 : c1 < e50 and e50 < e200 ? -1 : 0
+    bias
+
+bias1 = f_htf_bias(htf1)
+bias2 = f_htf_bias(htf2)
+htfBias = bias1 + bias2     // -2..+2
+
+// EMA locali
+ema21  = ta.ema(close, 21)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+
+// ============================================================
+//  SWING / STRUCTURE / BOS / CHoCH
+// ============================================================
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low,  swingLen, swingLen)
+
+var float lastPH = na
+var float lastPL = na
+var int   lastPHbar = na
+var int   lastPLbar = na
+if not na(ph)
+    lastPH := ph
+    lastPHbar := bar_index - swingLen
+if not na(pl)
+    lastPL := pl
+    lastPLbar := bar_index - swingLen
+
+// Struttura (semplice ma efficace)
+var int structDir = 0   // 1 up, -1 down, 0 neutral
+var bool bosUp = false
+var bool bosDn = false
+var bool chochUp = false
+var bool chochDn = false
+bosUp   := false
+bosDn   := false
+chochUp := false
+chochDn := false
+
+if not na(lastPH) and close > lastPH and close[1] <= lastPH
+    if structDir == -1
+        chochUp := true
+    else
+        bosUp := true
+    structDir := 1
+if not na(lastPL) and close < lastPL and close[1] >= lastPL
+    if structDir == 1
+        chochDn := true
+    else
+        bosDn := true
+    structDir := -1
+
+// ============================================================
+//  LIQUIDITY SWEEP (wick prende swing precedente e chiude dentro)
+// ============================================================
+sweepHigh = not na(lastPH) and high > lastPH and close < lastPH
+sweepLow  = not na(lastPL) and low  < lastPL and close > lastPL
+
+// ============================================================
+//  FAIR VALUE GAP (3-bar imbalance)
+// ============================================================
+atrV = ta.atr(atrLen)
+fvgBullNew = low > high[2] and (low - high[2]) > atrV * fvgMinAtrPct
+fvgBearNew = high < low[2] and (low[2] - high) > atrV * fvgMinAtrPct
+
+// Tieni traccia dell'ultimo FVG attivo (zona)
+var float fvgBullTop = na
+var float fvgBullBot = na
+var float fvgBearTop = na
+var float fvgBearBot = na
+var int   fvgBullBar = na
+var int   fvgBearBar = na
+
+if fvgBullNew
+    fvgBullTop := low
+    fvgBullBot := high[2]
+    fvgBullBar := bar_index
+if fvgBearNew
+    fvgBearTop := low[2]
+    fvgBearBot := high
+    fvgBearBar := bar_index
+
+// FVG mitigato (riempito) → annulla
+if not na(fvgBullBot) and low <= fvgBullBot
+    fvgBullTop := na
+    fvgBullBot := na
+if not na(fvgBearTop) and high >= fvgBearTop
+    fvgBearTop := na
+    fvgBearBot := na
+
+// Disegno FVG (storico visibile)
+if showHistory and fvgBullNew
+    box.new(bar_index-2, low, bar_index+8, high[2], border_color=color.new(color.green,60), bgcolor=color.new(color.green,85))
+if showHistory and fvgBearNew
+    box.new(bar_index-2, low[2], bar_index+8, high, border_color=color.new(color.red,60), bgcolor=color.new(color.red,85))
+
+// ============================================================
+//  ORDER BLOCK (ultima candela opposta prima di un impulso che rompe struttura)
+// ============================================================
+var float obBullTop = na
+var float obBullBot = na
+var float obBearTop = na
+var float obBearBot = na
+
+// Bullish OB: ultima candela ribassista prima di una serie verde che fa BOS up
+if bosUp
+    // cerca ultima candela rossa nei 10 bar precedenti
+    for i = 1 to 10
+        if close[i] < open[i]
+            obBullTop := high[i]
+            obBullBot := low[i]
+            break
+if bosDn
+    for i = 1 to 10
+        if close[i] > open[i]
+            obBearTop := high[i]
+            obBearBot := low[i]
+            break
+
+// OB invalidato se chiuso oltre
+if not na(obBullBot) and close < obBullBot
+    obBullTop := na
+    obBullBot := na
+if not na(obBearTop) and close > obBearTop
+    obBearTop := na
+    obBearBot := na
+
+inBullOB = not na(obBullBot) and low <= obBullTop and high >= obBullBot
+inBearOB = not na(obBearBot) and high >= obBearBot and low <= obBearTop
+
+// ============================================================
+//  MOMENTUM: MACD + RSI
+// ============================================================
+[macdLine, macdSig, macdHist] = ta.macd(close, 12, 26, 9)
+macdUp   = macdHist > 0 and macdHist > macdHist[1]
+macdDn   = macdHist < 0 and macdHist < macdHist[1]
+macdCrossUp = ta.crossover(macdLine, macdSig)
+macdCrossDn = ta.crossunder(macdLine, macdSig)
+
+rsiV = ta.rsi(close, 14)
+rsiBull = rsiV > 50 and rsiV > rsiV[1]
+rsiBear = rsiV < 50 and rsiV < rsiV[1]
+
+// ============================================================
+//  VOLUME / OBV
+// ============================================================
+volOk = na(volume) or volume == 0 ? true : volume > ta.sma(volume, 20) * volMult
+obv   = ta.cum(math.sign(ta.change(close)) * (na(volume) ? 1 : volume))
+obvUp = obv > ta.ema(obv, 21)
+obvDn = obv < ta.ema(obv, 21)
+
+// ============================================================
+//  MACRO INTER-MARKET (correlazioni che pesano sulla direzione)
+// ============================================================
+f_chg(tf, tk) =>
+    s = request.security(tk, tf, close, lookahead=barmerge.lookahead_off)
+    chg = (s - s[1]) / s[1] * 100
+    chg
+
+// fonti
+chgDXY  = f_chg(timeframe.period, "TVC:DXY")
+chgVIX  = f_chg(timeframe.period, "TVC:VIX")
+chgUS10 = f_chg(timeframe.period, "TVC:US10Y")
+chgES   = f_chg(timeframe.period, "CME_MINI:ES1!")
+
+// score macro -2..+2 in funzione dell'asset
+macroScore = 0.0
+if asset == "XAUUSD"
+    // Oro sale con DXY giù, VIX su (risk-off), rendimenti reali giù (proxy: US10Y giù)
+    macroScore := (chgDXY < 0 ? 1 : -1) + (chgUS10 < 0 ? 1 : -1) + (chgVIX > 0 ? 0.5 : -0.5)
+if asset == "NASDAQ100"
+    // Nasdaq sale con DXY giù, VIX giù, rendimenti giù, ES su
+    macroScore := (chgDXY < 0 ? 0.5 : -0.5) + (chgVIX < 0 ? 1 : -1) + (chgUS10 < 0 ? 0.5 : -0.5) + (chgES > 0 ? 1 : -1)
+if asset == "EURUSD"
+    // EURUSD inverso a DXY, leggermente correlato a risk-on
+    macroScore := (chgDXY < 0 ? 1.5 : -1.5) + (chgVIX < 0 ? 0.5 : -0.5) + (chgES > 0 ? 0.3 : -0.3)
+if asset == "GENERIC"
+    macroScore := (chgDXY < 0 ? 0.5 : -0.5) + (chgVIX < 0 ? 0.5 : -0.5)
+
+macroBull = macroScore >= 1
+macroBear = macroScore <= -1
+
+// ============================================================
+//  CONFLUENZA → SCORE DIREZIONALE
+// ============================================================
+// Segnali grezzi
+trigUp = (bosUp or chochUp or sweepLow) and (inBullOB or not na(fvgBullBot) or close > ema21)
+trigDn = (bosDn or chochDn or sweepHigh) and (inBearOB or not na(fvgBearBot) or close < ema21)
+
+// Conferme
+confirmUp = (htfBias >= 1) and macdUp and rsiBull and volOk and obvUp and not macroBear
+confirmDn = (htfBias <= -1) and macdDn and rsiBear and volOk and obvDn and not macroBull
+
+longSig  = trigUp and confirmUp
+shortSig = trigDn and confirmDn
+
+// ============================================================
+//  GESTIONE STATO: ENTRY UNICO + CONT + EXIT
+// ============================================================
+var int    pos = 0          // 1 long, -1 short, 0 flat
+var float  entryPx = na
+var float  slPx    = na
+var float  tpPx    = na
+var int    entryBar = na
+
+// SL / TP basati su ATR + struttura
+swingLowRef  = ta.lowest(low,  swingLen*2)
+swingHighRef = ta.highest(high, swingLen*2)
+
+// Apertura LONG
+if longSig and pos != 1
+    pos := 1
+    entryPx := close
+    slPx    := math.min(swingLowRef, close - atrV*atrSLmult)
+    tpPx    := close + atrV*atrTPmult
+    entryBar := bar_index
+    if showHistory or bar_index >= last_bar_index - 1
+        label.new(bar_index, low, "ENTRY▲\n" + str.tostring(entryPx, format.mintick), color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+// Apertura SHORT
+if shortSig and pos != -1
+    pos := -1
+    entryPx := close
+    slPx    := math.max(swingHighRef, close + atrV*atrSLmult)
+    tpPx    := close - atrV*atrTPmult
+    entryBar := bar_index
+    if showHistory or bar_index >= last_bar_index - 1
+        label.new(bar_index, high, "ENTRY▼\n" + str.tostring(entryPx, format.mintick), color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+// CONTINUAZIONE: stesso lato, nuovo BOS, momentum ancora valido
+contUp = pos == 1  and bosUp and macdUp and not macroBear and bar_index > entryBar + 2
+contDn = pos == -1 and bosDn and macdDn and not macroBull and bar_index > entryBar + 2
+if contUp
+    label.new(bar_index, low, "CONT▲", color=color.new(color.teal,20), textcolor=color.white, style=label.style_label_up, size=size.tiny)
+    tpPx := close + atrV*atrTPmult        // estendi TP
+if contDn
+    label.new(bar_index, high, "CONT▼", color=color.new(color.maroon,20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
+    tpPx := close - atrV*atrTPmult
+
+// EXIT: TP hit, SL hit, o reversal di structure/MACD
+exitLong  = pos == 1  and (high >= tpPx or low <= slPx or chochDn or macdCrossDn)
+exitShort = pos == -1 and (low  <= tpPx or high >= slPx or chochUp or macdCrossUp)
+
+if exitLong
+    reason = high >= tpPx ? "TP1" : low <= slPx ? "SL" : "REV"
+    label.new(bar_index, high, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_down, size=size.small)
+    pos := 0
+    entryPx := na
+    slPx := na
+    tpPx := na
+if exitShort
+    reason = low <= tpPx ? "TP1" : high >= slPx ? "SL" : "REV"
+    label.new(bar_index, low, "EXIT " + reason + "\n" + str.tostring(close, format.mintick), color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_up, size=size.small)
+    pos := 0
+    entryPx := na
+    slPx := na
+    tpPx := na
+
+// ============================================================
+//  PLOT EMA + linee TP/SL operative
+// ============================================================
+plot(ema21,  "EMA21",  color=color.new(color.yellow,0))
+plot(ema50,  "EMA50",  color=color.new(color.aqua,0))
+plot(ema200, "EMA200", color=color.new(color.fuchsia,0))
+
+plot(pos != 0 ? entryPx : na, "Entry", color=color.new(color.white,0), style=plot.style_linebr, linewidth=2)
+plot(pos != 0 ? tpPx    : na, "TP1",   color=color.new(color.lime,0),  style=plot.style_linebr, linewidth=2)
+plot(pos != 0 ? slPx    : na, "SL",    color=color.new(color.red,0),   style=plot.style_linebr, linewidth=2)
+
+// ============================================================
+//  ALERTS
+// ============================================================
+alertcondition(longSig,  "LONG Entry",  "SMH LONG entry")
+alertcondition(shortSig, "SHORT Entry", "SMH SHORT entry")
+alertcondition(exitLong or exitShort, "EXIT", "SMH exit")
+
+// ============================================================
+//  DASHBOARD
+// ============================================================
+f_trendTxt(b) => b >= 2 ? "STRONG BULL" : b == 1 ? "BULL" : b == -1 ? "BEAR" : b <= -2 ? "STRONG BEAR" : "NEUTRAL"
+f_trendCol(b) => b >  0 ? color.new(color.green,20) : b < 0 ? color.new(color.red,20) : color.new(color.gray,40)
+
+momentumTxt = macdUp and rsiBull ? "BULL ↑" : macdDn and rsiBear ? "BEAR ↓" : "MIXED"
+momentumCol = macdUp and rsiBull ? color.new(color.green,30) : macdDn and rsiBear ? color.new(color.red,30) : color.new(color.gray,40)
+
+structTxt = structDir ==  1 ? "BULLISH" : structDir == -1 ? "BEARISH" : "NEUTRAL"
+structCol = structDir ==  1 ? color.new(color.green,30) : structDir == -1 ? color.new(color.red,30) : color.new(color.gray,40)
+
+fvgTxt = not na(fvgBullBot) ? "BULL FVG attiva" : not na(fvgBearBot) ? "BEAR FVG attiva" : "—"
+obTxt  = not na(obBullBot)  ? "BULL OB attivo"  : not na(obBearBot)  ? "BEAR OB attivo"  : "—"
+liqTxt = sweepHigh ? "SWEEP HIGH"  : sweepLow ? "SWEEP LOW" : "—"
+
+macroTxt = macroBull ? "RISK-ON ↑" : macroBear ? "RISK-OFF ↓" : "NEUTRAL"
+macroCol = macroBull ? color.new(color.green,30) : macroBear ? color.new(color.red,30) : color.new(color.gray,40)
+
+posTxt = pos == 1 ? "LONG" : pos == -1 ? "SHORT" : "FLAT"
+posCol = pos == 1 ? color.new(color.green,10) : pos == -1 ? color.new(color.red,10) : color.new(color.gray,30)
+
+actionTxt = longSig ? "ENTRA LONG" : shortSig ? "ENTRA SHORT" : exitLong or exitShort ? "ESCI" : contUp ? "CONTINUA LONG" : contDn ? "CONTINUA SHORT" : pos != 0 ? "MANTIENI" : "ATTENDI"
+actionCol = longSig or contUp ? color.new(color.green,0) : shortSig or contDn ? color.new(color.red,0) : exitLong or exitShort ? color.new(color.orange,0) : color.new(color.gray,30)
+
+if showDash and barstate.islast
+    var table dash = table.new(position.top_right, 2, 14, border_width=1, frame_color=color.new(color.gray,40), frame_width=1)
+    table.cell(dash, 0, 0,  "SMART MOMENTUM HUNTER", bgcolor=color.new(color.blue,30), text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, 0,  asset, bgcolor=color.new(color.blue,50), text_color=color.white, text_size=size.normal)
+    table.cell(dash, 0, 1,  "Timeframe",        bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 1,  timeframe.period + " (HTF " + htf1 + "/" + htf2 + ")")
+    table.cell(dash, 0, 2,  "HTF Bias",         bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 2,  f_trendTxt(htfBias), bgcolor=f_trendCol(htfBias), text_color=color.white)
+    table.cell(dash, 0, 3,  "Struttura",        bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 3,  structTxt, bgcolor=structCol, text_color=color.white)
+    table.cell(dash, 0, 4,  "Momentum",         bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 4,  momentumTxt, bgcolor=momentumCol, text_color=color.white)
+    table.cell(dash, 0, 5,  "MACD hist",        bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 5,  str.tostring(macdHist, "#.####"))
+    table.cell(dash, 0, 6,  "RSI(14)",          bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 6,  str.tostring(rsiV, "#.#"))
+    table.cell(dash, 0, 7,  "Volume",           bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 7,  volOk ? "OK" : "weak", bgcolor=volOk ? color.new(color.green,40) : color.new(color.gray,40), text_color=color.white)
+    table.cell(dash, 0, 8,  "FVG / OB / Liq",   bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 8,  fvgTxt + " | " + obTxt + " | " + liqTxt, text_size=size.small)
+    table.cell(dash, 0, 9,  "Macro Score",      bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 9,  macroTxt + "  (" + str.tostring(macroScore, "#.#") + ")", bgcolor=macroCol, text_color=color.white)
+    table.cell(dash, 0, 10, "Posizione",        bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 10, posTxt, bgcolor=posCol, text_color=color.white)
+    table.cell(dash, 0, 11, "Entry",            bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 11, pos == 0 ? "—" : str.tostring(entryPx, format.mintick))
+    table.cell(dash, 0, 12, "TP1 / SL",         bgcolor=color.new(color.gray,80))
+    table.cell(dash, 1, 12, pos == 0 ? "—" : str.tostring(tpPx, format.mintick) + "  /  " + str.tostring(slPx, format.mintick))
+    table.cell(dash, 0, 13, "AZIONE",           bgcolor=color.new(color.black,0), text_color=color.white)
+    table.cell(dash, 1, 13, actionTxt, bgcolor=actionCol, text_color=color.white, text_size=size.normal)
