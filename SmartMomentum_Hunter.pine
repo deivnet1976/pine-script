@@ -296,13 +296,13 @@ scoreDn = (htfBias <= -1 ? 1 : 0) + (macdDn or macdHist < 0 ? 1 : 0) + (rsiV < 5
 stdLong  = trigUp and scoreUp >= scoreNeeded
 stdShort = trigDn and scoreDn >= scoreNeeded
 
-// PRE-ENTRY zona: flip momentum sul LTF + bias HTF + dentro FVG/OB
-preLong  = ltfFlipUp and htfBias >= 1 and trigUpZone and not macroBear and close > ema21
-preShort = ltfFlipDn and htfBias <= -1 and trigDnZone and not macroBull and close < ema21
+// PRE-ENTRY zona: flip momentum sul LTF + bias HTF + dentro FVG/OB + confluenza forte
+preLong  = ltfFlipUp and htfBias >= 1 and trigUpZone and not macroBear and close > ema21 and scoreUp >= 3
+preShort = ltfFlipDn and htfBias <= -1 and trigDnZone and not macroBull and close < ema21 and scoreDn >= 3
 
-// PRE-ENTRY pure-momentum: flip LTF + HTF allineato + macro + EMA50 (anticipo massimo)
-pureLong  = ltfFlipUp and htfBias >= 1 and not macroBear and close > ema50 and scoreUp >= 2
-pureShort = ltfFlipDn and htfBias <= -1 and not macroBull and close < ema50 and scoreDn >= 2
+// PRE-ENTRY pure-momentum: solo a bias HTF FORTE e confluenza alta (evita falsi anticipi)
+pureLong  = ltfFlipUp and htfBias >= 2 and not macroBear and close > ema50 and scoreUp >= 4
+pureShort = ltfFlipDn and htfBias <= -2 and not macroBull and close < ema50 and scoreDn >= 4
 
 longSigRaw  = stdLong  or preLong  or pureLong
 shortSigRaw = stdShort or preShort or pureShort
@@ -321,10 +321,20 @@ bool didEntryLong  = false
 bool didEntryShort = false
 bool didExit       = false
 
-// 1) EXIT PRIMA — chiude la posizione esistente. Se arriva un segnale opposto,
-//    qui esce; l'entry opposto potrà aprirsi solo nel bar successivo (mai sovrapposti).
-exitLongCond  = pos == 1  and (high >= tpPx or low <= slPx or chochDn or macdCrossDn or ltfFlipDn or shortSigRaw)
-exitShortCond = pos == -1 and (low  <= tpPx or high >= slPx or chochUp or macdCrossUp or ltfFlipUp or longSigRaw)
+// Cooldown post-exit: nessuna nuova ENTRA per N bar dopo un ESCI (anti flip-flop)
+var int lastExitBar = na
+cooldownBars = 3
+inCooldown  = not na(lastExitBar) and (bar_index - lastExitBar) < cooldownBars
+
+// 1) EXIT PRIMA — chiude SOLO al vero termine del trend:
+//    - TP1 raggiunto (target)
+//    - SL colpito (invalidazione)
+//    - CHoCH sul TF operativo (rottura di struttura confermata)
+//    - bias HTF flippato contro la posizione (cambio di regime)
+//    I pullback intermedi (MACD cross, LTF flip) NON chiudono più: il trend continua
+//    e li vediamo come label CONTINUA.
+exitLongCond  = pos == 1  and (high >= tpPx or low <= slPx or chochDn or htfBias <= -1)
+exitShortCond = pos == -1 and (low  <= tpPx or high >= slPx or chochUp or htfBias >=  1)
 
 if exitLongCond
     label.new(bar_index, high, "ESCI", color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_down, size=size.small)
@@ -333,6 +343,7 @@ if exitLongCond
     slPx := na
     tpPx := na
     didExit := true
+    lastExitBar := bar_index
 if exitShortCond
     label.new(bar_index, low, "ESCI", color=color.new(color.orange,0), textcolor=color.black, style=label.style_label_up, size=size.small)
     pos := 0
@@ -340,9 +351,10 @@ if exitShortCond
     slPx := na
     tpPx := na
     didExit := true
+    lastExitBar := bar_index
 
-// 2) ENTRY DOPO — solo se flat (pos==0). Mai un long mentre short e viceversa.
-if longSigRaw and pos == 0
+// 2) ENTRY DOPO — solo se flat (pos==0) e fuori cooldown. Mai un long mentre short e viceversa.
+if longSigRaw and pos == 0 and not inCooldown
     pos := 1
     entryPx := close
     slPx    := math.min(swingLowRef, close - atrV*atrSLmult)
@@ -351,7 +363,7 @@ if longSigRaw and pos == 0
     label.new(bar_index, low, "ENTRA", color=color.new(color.green,0), textcolor=color.white, style=label.style_label_up, size=size.small)
     didEntryLong := true
 
-if shortSigRaw and pos == 0
+if shortSigRaw and pos == 0 and not inCooldown
     pos := -1
     entryPx := close
     slPx    := math.max(swingHighRef, close + atrV*atrSLmult)
@@ -360,15 +372,20 @@ if shortSigRaw and pos == 0
     label.new(bar_index, high, "ENTRA", color=color.new(color.red,0), textcolor=color.white, style=label.style_label_down, size=size.small)
     didEntryShort := true
 
-// 3) CONTINUAZIONE — stesso colore della direzione del trade
-contUp = pos == 1  and (bosUp or ltfFlipUp) and macdHist > 0 and not macroBear and bar_index > entryBar + 2
-contDn = pos == -1 and (bosDn or ltfFlipDn) and macdHist < 0 and not macroBull and bar_index > entryBar + 2
+// 3) CONTINUAZIONE — solo su nuovo BOS sul TF chart, con cooldown anti-spam
+var int lastContBar = na
+contSpacing = 4
+canCont = na(lastContBar) or (bar_index - lastContBar) >= contSpacing
+contUp = pos == 1  and bosUp and macdHist > 0 and not macroBear and bar_index > entryBar + 2 and canCont
+contDn = pos == -1 and bosDn and macdHist < 0 and not macroBull and bar_index > entryBar + 2 and canCont
 if contUp
     label.new(bar_index, low, "CONTINUA", color=color.new(color.green,20), textcolor=color.white, style=label.style_label_up, size=size.tiny)
     tpPx := close + atrV*atrTPmult
+    lastContBar := bar_index
 if contDn
     label.new(bar_index, high, "CONTINUA", color=color.new(color.red,20), textcolor=color.white, style=label.style_label_down, size=size.tiny)
     tpPx := close - atrV*atrTPmult
+    lastContBar := bar_index
 
 // ============================================================
 //  PLOT EMA + linee TP/SL operative
