@@ -65,6 +65,30 @@ Mantieni gli altri principi di qualità già in uso in questo progetto: SEO comp
 ### Step 6 — Traccia le correzioni applicate
 Nella consegna, riepiloga esplicitamente **quali punti dell'audit sono stati applicati e dove** (es. tabella "Raccomandazione audit → Dove l'ho applicata"). Questo permette all'utente di verificare che l'audit sia stato seguito, non solo il sito copiato.
 
+## Fast mode — obbligatorio, riduce tempo e token
+
+Le generazioni precedenti riscrivevano da zero ~1500-2000 righe di CSS/JS quasi identiche a ogni sito (bottoni, nav, reveal-on-scroll, cursor, 3D tilt, marquee, footer, form). Da ora questo è vietato: quel codice è **condiviso e va copiato, non rigenerato**.
+
+**Regola**: target ≤180 secondi per generazione. Il modo per starci è generare solo la parte che cambia davvero da sito a sito (contenuto, palette, font, layout bespoke), non il framework.
+
+### Procedura
+
+1. **Copia i file base con Bash `cp`** (costo zero in token, istantaneo) — non leggerli/riscriverli:
+   ```bash
+   cp .claude/skills/homepage-demo-generator/templates/base.css <dest>/base.css
+   cp .claude/skills/homepage-demo-generator/templates/base.js <dest>/base.js
+   ```
+2. **Scrivi solo `index.html`**, partendo dalla struttura di `templates/skeleton.html`:
+   - Un blocco `<style>` con SOLO gli override dei token `:root` (colori, font, radius) + eventuali regole bespoke che `base.css` non copre già (es. uno stack fotografico hero specifico). Non ridefinire classi già presenti in `base.css` (`.btn`, `.nav`, `.reveal`, `.marquee`, `.tilt-3d`, `.gallery-3d`, `.sticky-pair`, ecc.) — usale così come sono.
+   - Contenuto HTML reale (testi riscritti secondo l'audit, immagini reali del sito sorgente).
+   - `<link rel="stylesheet" href="base.css">` e `<script src="base.js" defer></script>` — niente JS inline salvo logica davvero specifica di quel sito (rara).
+3. **Non chiamare `ui-ux-pro-max --design-system` con output ASCII completo per ogni sito** se palette/font sono già dettati dalla fonte (sito originale) o dall'audit — usa la skill solo per una query mirata (`--domain color` o `--domain typography`, output breve) quando serve davvero una decisione, non come rito di apertura.
+4. **Un'unica sequenza di tool call**, non a ondate: leggi audit + fonte, poi genera in un solo passaggio. Evita cicli di bozza-poi-rifinitura a meno che l'utente non lo chieda esplicitamente.
+
+### Quando è OK derogare
+
+Se il sito richiede un pattern visivo che `base.css` non copre affatto (es. un cubo 3D rotante, un layout bento specifico), scrivi quella porzione bespoke nello `<style>` della pagina — ma resta un'eccezione mirata, non un motivo per riscrivere tutto da capo.
+
 ## Cosa NON fare
 
 - Non inventare testi che non derivano né dal sito né da una riscrittura guidata dall'audit di un testo esistente.
